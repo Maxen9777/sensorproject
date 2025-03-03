@@ -1,0 +1,233 @@
+import processing.serial.*;
+import java.util.ArrayList;
+import ddf.minim.*;
+
+Serial myPort;
+Minim minim;
+AudioPlayer c_Note, d_Note, e_Note;
+
+ArrayList<Note> notes = new ArrayList<>();
+int hitZoneY; // Y-position of the hit zone
+int score = 0;
+float scoreModifier = 1;
+int streak = 0;
+int streakPowerVal = 0;
+int streakPowerCounter = 0;
+int missedNotes = 0;
+final float MINIMUM_SCORE_THRESHOLD = 10.0;
+boolean leftPressed = false, middlePressed = false, rightPressed = false;
+boolean leftPlayed = false, middlePlayed = false, rightPlayed = false;
+boolean streakPower = false, isStreakPowerAvaliable = false;
+String sensorData = "";
+String[] sensorValues;
+
+void setup() {
+  fullScreen();
+  hitZoneY = height - 100;
+  
+  // Initialize serial connection (update index if needed)
+  printArray(Serial.list());
+  myPort = new Serial(this, Serial.list()[0], 9600);
+  myPort.bufferUntil('\n');
+  
+  // Initialize Minim and load sound files
+  minim = new Minim(this);
+  c_Note = minim.loadFile("högre_C.wav");
+  d_Note = minim.loadFile("nytt_D.wav");
+  e_Note = minim.loadFile("högre_E.wav");
+  
+  // Generate falling notes at longer intervals
+  for (int i = 0; i < 200; i++) {
+    notes.add(new Note(i * 200)); // Increased spacing between notes
+  }
+}
+
+void draw() {
+  background(50);
+  
+  stroke(255);
+  strokeWeight(3);
+  line(width / 3, 0, width / 3, height);
+  line(2 * width / 3, 0, 2 * width / 3, height);
+
+  // Draw hit zone
+  fill(255, 0, 0, 150);
+  rect(0, hitZoneY, width, 10);
+  if (sensorValues != null) {
+    if((int(sensorValues[0].split(",")[0]) <= 400)) {
+     streakPowerCounter += 1;
+     streakPower = true;
+    } else {
+      streakPowerCounter = 0;
+      streakPower = false;
+    }
+  }
+  
+  // Draw score & streak
+  fill(255);
+  textSize(20);
+  scoreModifier = streakPowerCounter == 0 || streak < 2
+                              ? (streak / MINIMUM_SCORE_THRESHOLD + 1) 
+                              : (streakPowerCounter < 100
+                              ? 2 * (streak / MINIMUM_SCORE_THRESHOLD + 1)
+                              : (streakPowerCounter < 600)
+                              ? 4 * (streak / MINIMUM_SCORE_THRESHOLD + 1)
+                              : (streakPowerCounter < 1000
+                              ? 6 * (streak / MINIMUM_SCORE_THRESHOLD + 1)
+                              : 8 * (streak / MINIMUM_SCORE_THRESHOLD + 1)));
+  text("Score: " + score + " (" + (String.format("%.1f", scoreModifier)) + "x)", 20, 30);
+  text("Streak: " + streak, 20, 60);
+  text("Missed Notes: " + missedNotes + "/20", 20, 90);
+
+  // Move and draw notes
+  for (int i = notes.size() - 1; i >= 0; i--) {
+    Note n = notes.get(i);
+    n.update();
+    n.display();
+    
+    // Check if a note is in the hit zone and was pressed
+    if (n.y >= hitZoneY - 10 && n.y <= hitZoneY + 10) {
+      if ((n.type == 0 && leftPressed && !leftPlayed) || 
+          (n.type == 1 && middlePressed && !middlePlayed) || 
+          (n.type == 2 && rightPressed && !rightPlayed)) {
+        score += round(10 * scoreModifier);
+        streak++;
+        streakPowerVal++;
+        notes.remove(i);
+        playSound(n.type);
+        
+        /*
+        if (streakPowerVal >= 10 && streakPower) {
+          streakPower = false;
+          isStreakPowerAvaliable = false;
+          streakPowerVal = 0;
+        }*/
+        
+        /*
+        if (streakPowerVal >= 10 && !isStreakPowerAvaliable) {
+           isStreakPowerAvaliable = true; 
+           streakPowerVal = 0;
+        }*/
+        
+        // Mark note as played to prevent automatic re-triggering
+        if (n.type == 0) leftPlayed = true;
+        if (n.type == 1) middlePlayed = true;
+        if (n.type == 2) rightPlayed = true;
+      }
+    }
+    
+    // Remove note if it falls off screen
+    if (n.y > height) {
+      notes.remove(i);
+      missedNotes++;
+      streak = 0;
+      streakPowerVal = 0;
+      
+      // Game over condition
+      if (missedNotes >= 20) {
+        fill(255, 0, 0);
+        text("GAME OVER", width/2, height/2 - 100);
+        text("Total Score: " + score, width/2, height/2);
+        println("Total Score: " + score);
+        println("Game Over!");
+        noLoop();
+      }
+    }
+  }
+}
+
+// Handle Serial Input from Arduino
+void serialEvent(Serial myPort) {
+  sensorData = myPort.readStringUntil('\n');  // Read the incoming data until newline
+  if (sensorData != null) {
+    sensorData = trim(sensorData);  // Remove any extra spaces
+    // Split the data by the tags ("Sensor1: ", "Sensor2: ")
+    sensorValues = split(sensorData, ", ");
+    
+    // Further clean up the data by extracting only the numeric part after the labels
+    for (int i = 0; i < sensorValues.length; i++) {
+      // Strip out the label part (e.g., "Sensor1: ") and keep the numeric value
+      int colonIndex = sensorValues[i].indexOf(':');
+      if (colonIndex != -1) {
+        sensorValues[i] = sensorValues[i].substring(colonIndex + 1);  // Get the part after the colon
+        sensorValues[i] = trim(sensorValues[i]);  // Remove any extra spaces
+      }
+    }
+    
+   if (sensorValues != null && sensorValues.length >= 2) { 
+    String input = sensorValues[1];
+    if (input != null) {
+      input = trim(input);
+      
+      // Detect touch presses
+      if (input.equals("Left")) {
+        leftPressed = true;
+        leftPlayed = false;
+      } else if (input.equals("Middle")) {
+        middlePressed = true;
+        middlePlayed = false;
+      } else if (input.equals("Right")) {
+        rightPressed = true;
+        rightPlayed = false;
+      }
+    }
+  }
+  }
+  
+
+}
+
+// Play the corresponding sound
+void playSound(int type) {
+  if (type == 0) {
+    c_Note.rewind();
+    c_Note.play();
+  } else if (type == 1) {
+    d_Note.rewind();
+    d_Note.play();
+  } else if (type == 2) {
+    e_Note.rewind();
+    e_Note.play();
+  }
+}
+  
+class Note {
+  int type;
+  float x, y, speed, length;
+  
+  Note(float startY) {
+    type = int(random(3));
+    y = -startY;
+    speed = 3;
+    length = 100;
+    x = type * (width / 3);
+  }
+  
+  void update() {
+    float speedModifer = streakPowerCounter / 100.0;
+    println(speedModifer);
+    
+    y += speed + speedModifer;
+  }
+  
+  void display() {
+    switch(type) {
+     case 0:
+       fill(0, 200, 0);
+       break;
+     case 1:
+       fill(200, 0, 0);
+       break;
+     case 2: 
+       fill(125, 125, 0);
+       break;
+     default:
+       fill(255);
+       break;
+    }
+    if(streakPower) {
+      fill(0, 100, 200);
+    }
+    rect(x, y, width / 3, length);
+  }
+}
