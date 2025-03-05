@@ -1,0 +1,341 @@
+import processing.serial.*;
+import processing.net.*;
+import java.util.ArrayList;
+import ddf.minim.*;
+
+Serial myPort; // Arduino serial
+Minim minim; // Audio player
+AudioPlayer noteC, noteD, noteE, noteCAdjusted, noteDAdjusted, noteEAdjusted; // All .wav files
+ArrayList<Note> notes = new ArrayList<>(); // All notes in the game
+int hitZoneY; // Y-position of the hitzone
+int score = 0; // Total score
+float scoreModifier = 1; // score * scoreModifier
+int streak = 0, // Notes hit without missing
+    hardModeCounter = 0; // Determines score modifier and speed
+int missedNotes = 0; // Total missed notes for game over
+final float SCORE_MODIFIER_DENOMINATOR = 10.0; // Determines the score modifier recieved
+final int TOUCH_THRESHOLD = 600; // The minimum touch value needed
+final int TOUCH_BUFFER = 5; // Size of averageTouch array
+final int TOUCH_GRACE_PERIOD_MILLISECONDS = 1000; // Grace period of touching and registring touch
+int lastTouchTime = 0; // Previous touch in milliseconds
+boolean leftPressed = false, middlePressed = false, rightPressed = false; // Pressed a key
+boolean leftPlayed = false, middlePlayed = false, rightPlayed = false; // Registried a hit
+boolean hardMode = false; // Hard mode toggle
+String sensorData = ""; // The data from the arduino
+int[] averageTouch = new int[TOUCH_BUFFER]; // Software filter for the metal touch sensor, average from 5 readings
+int touchIndex = 0; // The current index of the average touch array
+String[] sensorValues; // All readings from the arduino, ("Touch: 0-1024", "Slider: Left/Middle/Right")
+Server server; // Our server
+Client client; // The client (other project group)
+String clientAccelerometerData = "0.0"; // Client's actual accelerometer data
+float previousAccelerometer = 0.0; // Client's previous accelerometer data
+boolean nextIsSpooky = false; // Whether or not to adjust the notes played, determined by the other group
+boolean gameOverCondition = true; // Debug, to enable the game over condition
+
+boolean isSpooky() {
+  if (nextIsSpooky) {
+    return true;
+  }
+  if(clientAccelerometerData == "" || clientAccelerometerData == null) {
+    return false;
+  }
+  float delta = 0.05; // The difference needed to trigger the condition
+  float temp = previousAccelerometer;
+  float newAccelerometer = float(trim(clientAccelerometerData));
+  previousAccelerometer = newAccelerometer;
+  
+  if (abs(newAccelerometer - temp) > delta) {
+    nextIsSpooky = true; 
+  }
+  
+  return false;
+}
+
+float getScoreModifier() {
+  return hardModeCounter == 0 || streak < 2 // Minimum streak 1 or hard mode has not begun counting
+              ? (streak / SCORE_MODIFIER_DENOMINATOR + 1) // 1x-inf (slow)
+              
+              // Hard mode gains score modifier quicker
+              : (hardModeCounter < 100
+              ? 2 * (streak / SCORE_MODIFIER_DENOMINATOR + 1)
+              : (hardModeCounter < 600)
+              ? 4 * (streak / SCORE_MODIFIER_DENOMINATOR + 1)
+              : (hardModeCounter < 1000
+              ? 6 * (streak / SCORE_MODIFIER_DENOMINATOR + 1)
+              : 8 * (streak / SCORE_MODIFIER_DENOMINATOR + 1)));
+}
+
+void initializeBuffer() {
+  // Sets the inital array to 1024
+  for (int i = 0; i < TOUCH_BUFFER; i++) {
+    averageTouch[i] = 1024; 
+  }
+}
+
+void updateAverageTouch(int newValue) {
+   // Sets the current touchIndex to a new value and adjusts the touchIndex
+   averageTouch[touchIndex] = newValue;
+   touchIndex = (touchIndex + 1) % TOUCH_BUFFER;
+}
+
+int getAverageTouch() {
+  // Gets the average touch of the array
+  int sum = 0;
+  for(int i = 0; i < TOUCH_BUFFER; i++) {
+     sum += averageTouch[i];
+  }
+  
+  return int(sum / TOUCH_BUFFER);
+}
+
+void hardModeCheck() {
+  // Toggles the hard mode depending on the average touch
+  if(sensorValues == null) {
+    return;
+  }
+  
+  int rawTouchValue = int(sensorValues[0].split(",")[0]); 
+  updateAverageTouch(rawTouchValue);
+  int smoothedTouchValue = getAverageTouch();
+  
+  if(smoothedTouchValue <= TOUCH_THRESHOLD) {
+     hardModeCounter += 1;
+     hardMode = true;
+  } else {
+    hardModeCounter = 0;
+    hardMode = false;
+  }
+}
+
+void setup() {
+  fullScreen();
+  hitZoneY = height - 100;
+  
+  // Set touch array values to 1024 (max)
+  initializeBuffer();
+  
+  // Server
+  server = new Server(this, 5204);
+  
+  // Arduino
+  myPort = new Serial(this, Serial.list()[0], 9600);
+  myPort.bufferUntil('\n');
+  
+  // Initialize Minim and load sound files
+  minim = new Minim(this);
+  
+  noteC = minim.loadFile("högre_C.wav");
+  noteD = minim.loadFile("nytt_D.wav");
+  noteE = minim.loadFile("högre_E.wav");
+  
+  noteCAdjusted = minim.loadFile("spooky_C.wav");
+  noteDAdjusted = minim.loadFile("spooky_D.wav");
+  noteEAdjusted = minim.loadFile("spooky_E.wav");
+  
+  // Note Generation
+  for (int i = 0; i < 1000; i++) {
+    notes.add(new Note(i * 200));
+  }
+}
+
+void draw() {
+  if (client == null) {
+    client = server.available();
+  }
+  if (client != null) {
+    if (client.available() > 0) {
+      clientAccelerometerData = client.readStringUntil('\n');
+    }
+  }
+  
+  if (millis() - lastTouchTime >= TOUCH_GRACE_PERIOD_MILLISECONDS) {
+    leftPressed = false;
+    middlePressed = false;
+    rightPressed = false;
+  }
+  
+  background(50);
+  
+  stroke(255);
+  strokeWeight(3);
+  line(width / 3, 0, width / 3, height);
+  line(2 * width / 3, 0, 2 * width / 3, height);
+
+  // Hit zone
+  fill(255, 0, 0, 150);
+  rect(0, hitZoneY, width, 10);
+  
+  // Check if user is holding down the touch sensor to activate hard mode
+  hardModeCheck();
+  
+  // Render score, streak & missed notes
+  fill(255);
+  textSize(20);
+  scoreModifier = getScoreModifier();
+  text("Score: " + score + " (" + (String.format("%.1f", scoreModifier)) + "x)", 20, 30);
+  text("Streak: " + streak, 20, 60);
+  text("Missed Notes: " + missedNotes + "/20", 20, 90);
+
+  // Move and draw notes
+  for (int i = notes.size() - 1; i >= 0; i--) {
+    Note n = notes.get(i);
+    n.update();
+    n.display();
+    
+    // Check if a note is in the hit zone and was pressed
+    if (n.y >= hitZoneY - 10 && n.y <= hitZoneY + 10) {
+      if ((n.type == 0 && leftPressed && !leftPlayed) || 
+          (n.type == 1 && middlePressed && !middlePlayed) || 
+          (n.type == 2 && rightPressed && !rightPlayed)) {
+        score += round(10 * scoreModifier);
+        streak++;
+        notes.remove(i);
+        playSound(n.type);
+        
+        // Mark note as played to prevent automatic re-triggering
+        if (n.type == 0) leftPlayed = true;
+        if (n.type == 1) middlePlayed = true;
+        if (n.type == 2) rightPlayed = true;
+      }
+    }
+    
+    // Remove note if it falls off screen
+    if (n.y > height) {
+      notes.remove(i);
+      missedNotes++;
+      streak = 0;
+      
+      // Game over condition
+      if (missedNotes >= 20 && gameOverCondition) {
+        fill(255, 0, 0);
+        text("GAME OVER", width/2, height/2 - 100);
+        text("Total Score: " + score, width/2, height/2);
+        println("Total Score: " + score);
+        println("Game Over!");
+        noLoop();
+      }
+    }
+  }
+}
+
+// Handle Serial Input from Arduino
+void serialEvent(Serial myPort) {
+  sensorData = myPort.readStringUntil('\n');
+  if (sensorData != null) {
+    sensorData = trim(sensorData);
+    // Split the data by the tags ("Touch: ", "Slider: ")
+    sensorValues = split(sensorData, ", ");
+    
+    // Extracting only the numeric part after the labels
+    for (int i = 0; i < sensorValues.length; i++) {
+      // Strip out the label part (e.g., "Sensor1: ") and keep the numeric value
+      int colonIndex = sensorValues[i].indexOf(':');
+      if (colonIndex != -1) {
+        sensorValues[i] = sensorValues[i].substring(colonIndex + 1);  // Get the part after the :
+        sensorValues[i] = trim(sensorValues[i]);
+      }
+    }
+    
+     if (sensorValues != null && sensorValues.length >= 2) { 
+      String input = sensorValues[1];
+      if (input != null) {
+        input = trim(input);
+        lastTouchTime = millis();
+        
+        // Detect touch presses
+        if (input.equals("Left")) {
+          server.write("Left\n");
+          leftPressed = true;
+          leftPlayed = false;
+          server.write("\n");
+        } else if (input.equals("Middle")) {
+          server.write("Middle\n");
+          middlePressed = true;
+          middlePlayed = false;
+          server.write("\n");
+        } else if (input.equals("Right")) {
+          server.write("Right\n");
+          rightPressed = true;
+          rightPlayed = false;
+          server.write("\n");
+        }
+      }
+    }
+  }
+}
+
+// Play the corresponding sound
+void playSound(int type) {
+  if (type == 0) {
+    if(isSpooky()) {
+      noteCAdjusted.rewind();
+      noteCAdjusted.play();
+      nextIsSpooky = false;
+      return;
+    }
+    noteC.rewind();
+    noteC.play();
+    
+  } else if (type == 1) {
+    if(isSpooky()) {
+      noteDAdjusted.rewind();
+      noteDAdjusted.play();
+      nextIsSpooky = false;
+      return;
+    }
+    noteD.rewind();
+    noteD.play();
+    
+  } else if (type == 2) {
+    if(isSpooky()) {
+      noteEAdjusted.rewind();
+      noteEAdjusted.play();
+      nextIsSpooky = false;
+      return;
+    }
+    noteE.rewind();
+    noteE.play();
+  }
+}
+  
+class Note {
+  int type;
+  float x, y, speed, length;
+  
+  Note(float startY) {
+    // Constructor to initialize a note
+    type = int(random(3)); // 0 = Left, 1 = Middle, 2 = Right
+    y = -startY; // Y position for a note
+    speed = 3;
+    length = 100; // How long a note is
+    x = type * (width / 3); // X position for a note, based on the type
+  }
+  
+  void update() {
+    // Updates the y position (falling)
+    float speedModifer = hardModeCounter / 100.0;
+    
+    y += speed + speedModifer;
+  }
+  
+  void display() {
+    switch(type) {
+     case 0: // Left, green
+       fill(0, 200, 0);
+       break;
+     case 1: // Middle, red
+       fill(200, 0, 0);
+       break;
+     case 2: // Right, yellow
+       fill(125, 125, 0);
+       break;
+     default: // Null, white
+       fill(255);
+       break;
+    }
+    if(hardMode) { // Hard mode active, all blue
+      fill(0, 100, 200);
+    }
+    rect(x, y, width / 3, length); // Render the note
+  }
+}
