@@ -1,0 +1,65 @@
+
+
+#include <Wire.h>
+#include "SparkFun_CAP1203.h" // Click here to get the library: http://librarymanager/All#SparkFun_CAP1203
+
+// Touch A0
+// Slider A4-A5 I2C
+CAP1203 sensor; // Initialize sensor
+
+int analogPin = A0;
+
+int val = 0;
+
+void setup()
+{
+  Wire.begin();       // Join I2C bus
+  Serial.begin(9600); // Start serial for output
+
+  // Setup sensor
+  if (sensor.begin() == false)
+  {
+    Serial.println("Not connected. Please check connections and read the hookup guide.");
+    while (1)
+      ;
+  }
+  else
+  {
+    Serial.println("Connected!");
+  }
+}
+
+void loop()
+{
+
+  val = analogRead(analogPin);
+  Serial.print("Touch: ");
+  Serial.print(val);
+  Serial.print(", ");
+
+  if (sensor.isLeftTouched() == true)
+  {
+    Serial.print("Slider: ");
+    Serial.print("Left");
+    while (sensor.isLeftTouched() == true)
+      ; // Wait until user removes finger
+  }
+
+  if (sensor.isMiddleTouched() == true)
+  {
+    Serial.print("Slider: ");
+    Serial.print("Middle");
+    while (sensor.isMiddleTouched() == true)
+      ; // Wait until user removes finger
+  }
+
+  if (sensor.isRightTouched() == true)
+  {
+    Serial.print("Slider: ");
+    Serial.print("Right");
+    while (sensor.isRightTouched() == true)
+      ; // Wait until user removes finger
+  }
+  Serial.println();
+  delay(100);
+}
